@@ -1,0 +1,22 @@
+# Dependencies
+**/node_modules
+
+# Env
+**/.env
+**/.env.local
+
+# Expo / React Native
+**/.expo
+**/dist
+**/web-build
+
+# Next.js
+**/.next
+**/out
+
+# Logs
+**/*.log
+
+# OS
+.DS_Store
+Thumbs.db
