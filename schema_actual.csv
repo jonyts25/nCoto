@@ -1,0 +1,75 @@
+table_name,column_name,data_type
+logs,id,uuid
+logs,created_at,timestamp with time zone
+logs,visit_id,uuid
+visit_access_log,id,uuid
+visit_access_log,visit_id,uuid
+visit_access_log,created_at,timestamp with time zone
+visit_access_log,coto_id,uuid
+profiles,id,uuid
+profiles,coto_id,uuid
+profiles,created_at,timestamp with time zone
+profiles,updated_at,timestamp with time zone
+visits,id,uuid
+visits,created_at,timestamp with time zone
+visits,valid_until,timestamp with time zone
+visits,resident_id,uuid
+visits,schedule,jsonb
+visits,valid_day,date
+visits,ingreso_confirmado_at,timestamp with time zone
+visits,last_access_at,timestamp with time zone
+visits,package_followup_sent_at,timestamp with time zone
+visits,tenant_package_received,boolean
+visits,coto_id,uuid
+residents,id,uuid
+residents,created_at,timestamp with time zone
+residents,coto_id,uuid
+cotos,id,uuid
+cotos,created_at,timestamp with time zone
+logs,guard_id,uuid
+logs,coto_id,uuid
+deliveries,id,uuid
+deliveries,resident_id,uuid
+deliveries,expected_date,date
+deliveries,created_at,timestamp with time zone
+deliveries,coto_id,uuid
+proxy_sessions,id,uuid
+proxy_sessions,guard_id,uuid
+proxy_sessions,resident_id,uuid
+proxy_sessions,expires_at,timestamp with time zone
+proxy_sessions,created_at,timestamp with time zone
+proxy_sessions,coto_id,uuid
+proxy_messages,id,uuid
+proxy_messages,session_id,uuid
+proxy_messages,created_at,timestamp with time zone
+proxy_messages,coto_id,uuid
+package_followup_prompts,id,uuid
+package_followup_prompts,visit_id,uuid
+package_followup_prompts,resident_id,uuid
+package_followup_prompts,created_at,timestamp with time zone
+package_followup_prompts,closed_at,timestamp with time zone
+package_followup_prompts,coto_id,uuid
+logs,message,text
+profiles,display_name,text
+residents,role,text
+cotos,name,text
+residents,house_number,text
+deliveries,provider,text
+visits,guest_name,text
+deliveries,status,text
+deliveries,notes,text
+visits,house_number,text
+package_followup_prompts,outcome,text
+visits,status,text
+residents,phone_number,text
+residents,name,text
+proxy_sessions,resident_phone,text
+proxy_sessions,status,text
+visits,plates,text
+visit_access_log,actor,text
+visit_access_log,detail,text
+visits,note,text
+cotos,slug,text
+proxy_messages,sender,text
+proxy_messages,content,text
+visits,visit_type,text

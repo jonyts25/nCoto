@@ -5,6 +5,12 @@
 **/.env
 **/.env.local
 
+# WhatsApp Web session (never commit)
+bot/.wwebjs_auth/
+
+# Local dev dumps (may contain secrets)
+todo_mi_codigo.txt
+
 # Expo / React Native
 **/.expo
 **/dist

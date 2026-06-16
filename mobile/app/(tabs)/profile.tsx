@@ -1,4 +1,5 @@
 import { View, Text, Pressable } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import { clearToken } from "@/src/features/auth/session";
 
@@ -9,6 +10,7 @@ export default function ProfileScreen() {
   }
 
   return (
+    <SafeAreaView style={{ flex: 1 }} edges={["top", "left", "right", "bottom"]}>
     <View style={{ flex: 1, padding: 24, justifyContent: "center", gap: 12 }}>
       <Text style={{ fontSize: 18, fontWeight: "600" }}>Perfil</Text>
       <Text>Datos del residente (placeholder)</Text>
@@ -26,5 +28,6 @@ export default function ProfileScreen() {
         <Text style={{ color: "white", fontWeight: "600" }}>Cerrar sesión</Text>
       </Pressable>
     </View>
+    </SafeAreaView>
   );
 }

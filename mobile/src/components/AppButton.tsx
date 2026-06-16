@@ -1,22 +1,11 @@
-import { Pressable, Text } from "react-native";
+import type { ButtonProps } from "./Button";
+import { Button } from "./Button";
 
-type Props = {
-  title: string;
-  onPress: () => void | Promise<void>;
-};
+type Props = Pick<ButtonProps, "title" | "onPress" | "disabled" | "loading" | "minHeight">;
 
-export function AppButton({ title, onPress }: Props) {
+/** @deprecated Prefer `Button` con `variant` explícito; se mantiene por compatibilidad. */
+export function AppButton({ title, onPress, disabled, loading, minHeight }: Props) {
   return (
-    <Pressable
-      onPress={onPress}
-      style={{
-        backgroundColor: "black",
-        paddingVertical: 12,
-        borderRadius: 10,
-        alignItems: "center",
-      }}
-    >
-      <Text style={{ color: "white", fontWeight: "600" }}>{title}</Text>
-    </Pressable>
+    <Button title={title} onPress={onPress} variant="primary" disabled={disabled} loading={loading} minHeight={minHeight} />
   );
 }
