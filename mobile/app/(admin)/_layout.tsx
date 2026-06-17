@@ -29,6 +29,7 @@ export default function AdminLayout() {
       <Tabs.Screen
         name="announcements"
         options={{
+          href: null,
           title: 'Alertas',
           tabBarIcon: ({ color }) => <Ionicons name="warning" size={24} color={color} />,
         }}
@@ -36,6 +37,7 @@ export default function AdminLayout() {
       <Tabs.Screen
         name="pending_payments"
         options={{
+          href: null,
           title: 'Pagos',
           tabBarIcon: ({ color }) => <Ionicons name="cash-outline" size={24} color={color} />,
         }}

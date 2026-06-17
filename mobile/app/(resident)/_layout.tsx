@@ -1,6 +1,6 @@
 import { Tabs, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { useAuth } from "@/src/features/auth/useAuth";
 import {
   residentIsAwaitingApproval,
@@ -11,7 +11,6 @@ export default function ResidentLayout() {
   const router = useRouter();
   const { userRole, profile, isLoading } = useAuth();
   const kickRef = useRef<string | null>(null);
-  const isBoard = userRole === "board_member";
 
   useEffect(() => {
     if (isLoading || !profile || userRole !== "resident") return;
@@ -29,17 +28,6 @@ export default function ResidentLayout() {
       router.replace("/(auth)/waiting");
     }
   }, [isLoading, profile, userRole, router]);
-
-  const treasuryOptions = useMemo(
-    () => ({
-      title: "Tesorería" as const,
-      href: isBoard ? undefined : null,
-      tabBarIcon: ({ color }: { color: string }) => (
-        <Ionicons name="stats-chart-outline" size={24} color={color} />
-      ),
-    }),
-    [isBoard],
-  );
 
   return (
     <Tabs screenOptions={{ headerShown: false, tabBarActiveTintColor: "#0077B6" }}>
@@ -60,11 +48,19 @@ export default function ResidentLayout() {
       <Tabs.Screen
         name="payments"
         options={{
+          href: null,
           title: "Pagos",
           tabBarIcon: ({ color }) => <Ionicons name="receipt-outline" size={24} color={color} />,
         }}
       />
-      <Tabs.Screen name="treasury" options={treasuryOptions} />
+      <Tabs.Screen
+        name="treasury"
+        options={{
+          href: null,
+          title: "Tesorería",
+          tabBarIcon: ({ color }) => <Ionicons name="stats-chart-outline" size={24} color={color} />,
+        }}
+      />
       <Tabs.Screen
         name="profile"
         options={{
@@ -75,10 +71,12 @@ export default function ResidentLayout() {
       <Tabs.Screen
         name="users"
         options={{
+          href: null,
           title: "Usuarios",
           tabBarIcon: ({ color }) => <Ionicons name="people-circle" size={24} color={color} />,
         }}
       />
+      <Tabs.Screen name="visit/[id]" options={{ href: null }} />
     </Tabs>
   );
 }
