@@ -7,11 +7,11 @@ import {
   fetchProfileRole,
   listTodaysVisitsForGuard,
   loadVisitForSecurityScreen,
-  markVisitUsed,
-  peekVisitResidentIsDelinquent,
-  updateVisitGuardFields,
+  mapAccessReasonToMessage,
+  peekVisitAccessAction,
+  registerVisitAccess,
 } from "@/lib/visits/securityRepo";
-import type { Visit } from "@/lib/visits/types";
+import type { PeekVisitAccessAction, Visit } from "@/lib/visits/types";
 import { canValidateVisitNow, formatLocalDateISO } from "@/lib/visits/validation";
 
 function isTypingInField(target: EventTarget | null): boolean {
@@ -30,6 +30,27 @@ function createBrowserSupabase(): SupabaseClient {
   return createClient(url, key);
 }
 
+function confirmButtonLabel(peek: PeekVisitAccessAction): string {
+  if (peek.usageMode === "cycle") {
+    return peek.action === "exit" ? "Registrar salida" : "Registrar entrada";
+  }
+  return "Registrar ingreso";
+}
+
+function presenceBadgeLabel(peek: PeekVisitAccessAction | null, visit: Visit | null): string | null {
+  const mode = peek?.usageMode ?? visit?.usageMode;
+  if (mode !== "cycle") return null;
+  const presence = peek?.presence ?? visit?.presence;
+  if (presence === "inside") return "DENTRO";
+  if (presence === "outside") return "FUERA";
+  return "FUERA";
+}
+
+function listPresenceBadge(visit: Visit): string | null {
+  if (visit.usageMode !== "cycle") return null;
+  return visit.presence === "inside" ? "DENTRO" : "FUERA";
+}
+
 export function GuardScanClient() {
   const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
   const [sessionReady, setSessionReady] = useState(false);
@@ -44,10 +65,10 @@ export function GuardScanClient() {
   const [listLoading, setListLoading] = useState(true);
 
   const [scannedVisit, setScannedVisit] = useState<Visit | null>(null);
-  const [blockedVisit, setBlockedVisit] = useState<Visit | null>(null);
-  const [delinquent, setDelinquent] = useState(false);
-  const [delinquentCheckError, setDelinquentCheckError] = useState<string | null>(null);
+  const [accessPeek, setAccessPeek] = useState<PeekVisitAccessAction | null>(null);
+  const [entryBlockedMessage, setEntryBlockedMessage] = useState<string | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
 
   const [plates, setPlates] = useState("");
@@ -119,9 +140,8 @@ export function GuardScanClient() {
 
   const resetScanState = useCallback(() => {
     setScannedVisit(null);
-    setBlockedVisit(null);
-    setDelinquent(false);
-    setDelinquentCheckError(null);
+    setAccessPeek(null);
+    setEntryBlockedMessage(null);
     setScanError(null);
     setPlates("");
     setNote("");
@@ -132,10 +152,10 @@ export function GuardScanClient() {
       if (!supabase) return;
       setProcessing(true);
       setScanError(null);
-      setDelinquentCheckError(null);
-      setDelinquent(false);
-      setBlockedVisit(null);
+      setEntryBlockedMessage(null);
+      setSuccessMessage(null);
       setScannedVisit(null);
+      setAccessPeek(null);
 
       try {
         const load = await loadVisitForSecurityScreen(supabase, visitId);
@@ -154,26 +174,43 @@ export function GuardScanClient() {
           return;
         }
 
-        const validation = canValidateVisitNow(load.visit);
-        if (!validation.ok) {
-          setScanError(validation.reason);
+        const peekResult = await peekVisitAccessAction(supabase, visitId);
+        if (peekResult.error || !peekResult.peek) {
+          setScanError(peekResult.error ?? "No se pudo consultar el estado del pase.");
           return;
         }
 
-        const mora = await peekVisitResidentIsDelinquent(supabase, visitId);
-        if (mora.error) {
-          setDelinquentCheckError(mora.error);
+        const peek = peekResult.peek;
+        const allowsExit = peek.action === "exit" && peek.canRegister;
+
+        if (!allowsExit) {
+          const validation = canValidateVisitNow(load.visit);
+          if (!validation.ok) {
+            setScanError(validation.reason);
+            return;
+          }
         }
-        if (Boolean(mora.delinquent)) {
-          setDelinquent(true);
-          setBlockedVisit(load.visit);
-          setScannedVisit(null);
-          setPlates("");
-          setNote("");
+
+        if (!peek.canRegister && peek.reason === "mora" && peek.action !== "exit") {
+          setEntryBlockedMessage("Unidad en mora: no se puede registrar entrada.");
+          setAccessPeek(peek);
+          setScannedVisit(load.visit);
+          setPlates(load.visit.plates ?? "");
+          setNote(load.visit.note ?? "");
           return;
         }
-        setDelinquent(false);
-        setBlockedVisit(null);
+
+        if (!peek.canRegister && peek.action !== "exit") {
+          setScanError(mapAccessReasonToMessage(peek.reason));
+          return;
+        }
+
+        if (peek.action === "blocked") {
+          setScanError(mapAccessReasonToMessage(peek.reason));
+          return;
+        }
+
+        setAccessPeek(peek);
         setPlates(load.visit.plates ?? "");
         setNote(load.visit.note ?? "");
         setScannedVisit(load.visit);
@@ -224,16 +261,20 @@ export function GuardScanClient() {
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [supabase, role, processRawScan]);
 
+  const canConfirmAccess =
+    scannedVisit &&
+    accessPeek &&
+    !entryBlockedMessage &&
+    accessPeek.canRegister &&
+    accessPeek.action !== "blocked";
+
   const handleConfirmAccess = useCallback(async () => {
-    if (!supabase || !scannedVisit || delinquent) return;
+    if (!supabase || !scannedVisit || !accessPeek || !canConfirmAccess) return;
     setProcessing(true);
     setScanError(null);
     try {
-      await updateVisitGuardFields(supabase, scannedVisit.id, {
-        plates,
-        note,
-      });
-      await markVisitUsed(supabase, scannedVisit.id);
+      const result = await registerVisitAccess(supabase, scannedVisit.id, plates, note);
+      setSuccessMessage(result.action === "exit" ? "Salida registrada" : "Entrada registrada");
       resetScanState();
       await refreshList();
     } catch (err: unknown) {
@@ -241,9 +282,10 @@ export function GuardScanClient() {
     } finally {
       setProcessing(false);
     }
-  }, [scannedVisit, delinquent, plates, note, supabase, resetScanState, refreshList]);
+  }, [scannedVisit, accessPeek, canConfirmAccess, plates, note, supabase, resetScanState, refreshList]);
 
   const todayLabel = formatLocalDateISO(new Date());
+  const badgeLabel = presenceBadgeLabel(accessPeek, scannedVisit);
 
   const login = async () => {
     if (!supabase) return;
@@ -258,6 +300,7 @@ export function GuardScanClient() {
     if (!supabase) return;
     await supabase.auth.signOut();
     resetScanState();
+    setSuccessMessage(null);
   };
 
   if (!supabase || !sessionReady) {
@@ -302,33 +345,6 @@ export function GuardScanClient() {
 
   return (
     <div className="min-h-screen bg-zinc-100 text-zinc-900">
-      {delinquent && blockedVisit ? (
-        <div
-          className="fixed inset-0 z-[100] flex flex-col items-center justify-center gap-6 bg-red-800 p-8 text-center text-white shadow-2xl"
-          role="alertdialog"
-          aria-modal="true"
-          onKeyDown={(e) => e.preventDefault()}
-        >
-          <p className="max-w-[95vw] text-center text-3xl font-black uppercase leading-tight tracking-wide text-yellow-200 sm:text-5xl md:text-6xl">
-            ACCESO DENEGADO - CONTACTAR ADMINISTRACIÓN
-          </p>
-          <p className="text-lg opacity-90">
-            Unidad en mora. Visitante: {blockedVisit.guestName} · Pase {blockedVisit.id.slice(0, 8)}…
-          </p>
-          <p className="max-w-md text-sm leading-relaxed text-white/90">
-            El ingreso queda bloqueado. Esta alerta no se puede descartar: solo puedes recargar la página para volver a
-            operar en caseta. Contacta a administración por el adeudo del residente titular del pase.
-          </p>
-          <button
-            type="button"
-            onClick={() => window.location.reload()}
-            className="mt-2 rounded-lg bg-white px-8 py-3 text-lg font-bold text-red-800 hover:bg-zinc-100"
-          >
-            Recargar página
-          </button>
-        </div>
-      ) : null}
-
       <header className="border-b border-zinc-200 bg-white px-4 py-4 shadow-sm">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3">
           <div>
@@ -364,22 +380,70 @@ export function GuardScanClient() {
           <h2 className="mb-2 text-lg font-semibold">Último escaneo (buffer)</h2>
           <p className="mb-3 font-mono text-xs break-all text-zinc-600">{lastScanLine || "—"}</p>
           {processing ? <p className="text-sm text-blue-600">Procesando…</p> : null}
+          {successMessage ? (
+            <p className="mb-3 rounded-md bg-emerald-50 p-3 text-sm font-medium text-emerald-800" role="status">
+              {successMessage}
+            </p>
+          ) : null}
           {scanError ? (
             <p className="rounded-md bg-red-50 p-3 text-sm text-red-800" role="status">
               {scanError}
             </p>
           ) : null}
-          {delinquentCheckError && !delinquent ? (
-            <p className="mt-2 text-sm text-amber-800">Aviso morosidad: {delinquentCheckError}</p>
+
+          {scannedVisit && entryBlockedMessage ? (
+            <div className="mt-4 space-y-3 border-t border-zinc-100 pt-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="font-semibold text-red-800">Ingreso bloqueado</h3>
+                {badgeLabel ? (
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-xs font-bold uppercase ${
+                      badgeLabel === "DENTRO"
+                        ? "bg-blue-100 text-blue-800"
+                        : "bg-zinc-200 text-zinc-700"
+                    }`}
+                  >
+                    {badgeLabel}
+                  </span>
+                ) : null}
+              </div>
+              <p className="text-sm text-red-800">{entryBlockedMessage}</p>
+              <p className="text-sm text-zinc-600">
+                Visitante: <span className="font-medium">{scannedVisit.guestName}</span>
+              </p>
+              <button type="button" onClick={resetScanState} className="rounded-lg border border-zinc-300 px-4 py-2">
+                Cerrar
+              </button>
+            </div>
           ) : null}
 
-          {scannedVisit && !delinquent ? (
+          {scannedVisit && accessPeek && !entryBlockedMessage ? (
             <div className="mt-4 space-y-4 border-t border-zinc-100 pt-4">
-              <h3 className="font-semibold text-emerald-800">Pase válido — completar datos</h3>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="font-semibold text-emerald-800">Pase listo — completar datos</h3>
+                {badgeLabel ? (
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-xs font-bold uppercase ${
+                      badgeLabel === "DENTRO"
+                        ? "bg-blue-100 text-blue-800"
+                        : "bg-zinc-200 text-zinc-700"
+                    }`}
+                  >
+                    {badgeLabel}
+                  </span>
+                ) : null}
+              </div>
               <p className="text-sm">
-                <span className="font-medium">{scannedVisit.guestName}</span> ·{" "}
-                {scannedVisit.visitType} · hasta {new Date(scannedVisit.validUntil).toLocaleString()}
+                <span className="font-medium">{scannedVisit.guestName}</span> · {scannedVisit.visitType}
+                {scannedVisit.validUntil
+                  ? ` · hasta ${new Date(scannedVisit.validUntil).toLocaleString()}`
+                  : ""}
               </p>
+              {accessPeek.isDelinquent && accessPeek.action === "exit" ? (
+                <p className="rounded-md bg-amber-50 p-2 text-sm text-amber-900">
+                  Unidad en mora: solo se registra la salida.
+                </p>
+              ) : null}
               <label className="block text-sm">
                 <span className="mb-1 block font-medium text-zinc-700">Placas / identificación</span>
                 <span className="mb-2 block text-xs text-zinc-500">
@@ -390,6 +454,7 @@ export function GuardScanClient() {
                   value={plates}
                   onChange={(e) => setPlates(e.target.value)}
                   placeholder="Ej. ABC-123-D"
+                  disabled={processing}
                 />
               </label>
               <label className="block text-sm">
@@ -399,18 +464,24 @@ export function GuardScanClient() {
                   rows={2}
                   value={note}
                   onChange={(e) => setNote(e.target.value)}
+                  disabled={processing}
                 />
               </label>
               <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
-                  disabled={processing || delinquent}
+                  disabled={processing || !canConfirmAccess}
                   onClick={() => void handleConfirmAccess()}
                   className="rounded-lg bg-emerald-600 px-4 py-2 font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
                 >
-                  Registrar ingreso (mark_visit_used)
+                  {confirmButtonLabel(accessPeek)}
                 </button>
-                <button type="button" onClick={resetScanState} className="rounded-lg border border-zinc-300 px-4 py-2">
+                <button
+                  type="button"
+                  onClick={resetScanState}
+                  disabled={processing}
+                  className="rounded-lg border border-zinc-300 px-4 py-2"
+                >
                   Cancelar
                 </button>
               </div>
@@ -426,34 +497,49 @@ export function GuardScanClient() {
             <p className="text-sm text-zinc-500">No hay pases activos listados para hoy en este coto.</p>
           ) : (
             <ul className="max-h-[70vh] divide-y divide-zinc-100 overflow-y-auto">
-              {todaysVisits.map((v) => (
-                <li key={v.id} className="flex flex-col gap-1 py-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <p className="font-medium">{v.guestName}</p>
-                    <p className="text-xs text-zinc-500">
-                      {v.visitType}
-                      {v.validDay ? ` · día ${v.validDay}` : ""} · hasta{" "}
-                      {new Date(v.validUntil).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    className="shrink-0 text-sm text-blue-600 hover:underline"
-                    onClick={() => void processVisitId(v.id)}
-                  >
-                    Simular escaneo
-                  </button>
-                </li>
-              ))}
+              {todaysVisits.map((v) => {
+                const listBadge = listPresenceBadge(v);
+                return (
+                  <li key={v.id} className="flex flex-col gap-1 py-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="flex flex-wrap items-center gap-2 font-medium">
+                        {v.guestName}
+                        {listBadge ? (
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${
+                              listBadge === "DENTRO"
+                                ? "bg-blue-100 text-blue-800"
+                                : "bg-zinc-200 text-zinc-600"
+                            }`}
+                          >
+                            {listBadge}
+                          </span>
+                        ) : null}
+                      </p>
+                      <p className="text-xs text-zinc-500">
+                        {v.visitType}
+                        {v.validDay ? ` · día ${v.validDay}` : ""} · hasta{" "}
+                        {new Date(v.validUntil).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="shrink-0 text-sm text-blue-600 hover:underline"
+                      onClick={() => void processVisitId(v.id)}
+                    >
+                      Simular escaneo
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </section>
       </main>
 
       <footer className="mx-auto max-w-6xl px-4 py-8 text-center text-xs text-zinc-400">
-        Morosidad vía <code className="rounded bg-zinc-200 px-1">peek_visit_resident_is_delinquent</code> y tabla{" "}
-        <code className="rounded bg-zinc-200 px-1">properties</code>. El residente usa{" "}
-        <code className="rounded bg-zinc-200 px-1">current_user_property_is_delinquent()</code> en RLS propio.
+        Acceso caseta vía <code className="rounded bg-zinc-200 px-1">peek_visit_access_action</code> y{" "}
+        <code className="rounded bg-zinc-200 px-1">register_visit_access</code>.
       </footer>
     </div>
   );

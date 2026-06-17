@@ -1,5 +1,14 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Visit, VisitKind, WeeklySlot } from "./types";
+import type {
+  PeekVisitAccessAction,
+  RegisterVisitAccessResult,
+  Visit,
+  VisitAccessAction,
+  VisitKind,
+  VisitPresence,
+  VisitUsageMode,
+  WeeklySlot,
+} from "./types";
 import {
   isVisitListedForToday,
   normalizeTimeHm,
@@ -32,6 +41,110 @@ function mapVisitFromDB(row: Record<string, unknown>): Visit {
     ingresoConfirmadoAt:
       row.ingreso_confirmado_at != null ? String(row.ingreso_confirmado_at) : undefined,
     lastAccessAt: row.last_access_at != null ? String(row.last_access_at) : undefined,
+    usageMode:
+      row.usage_mode != null ? (String(row.usage_mode) as VisitUsageMode) : undefined,
+    presence:
+      row.presence != null ? (String(row.presence) as VisitPresence) : row.presence === null ? null : undefined,
+  };
+}
+
+export function mapAccessReasonToMessage(reason: string | null | undefined): string {
+  switch (reason) {
+    case "mora":
+      return "Unidad en mora";
+    case "pase_vencido":
+      return "Pase vencido";
+    case "fuera_de_dia":
+      return "Pase no válido para hoy";
+    case "fuera_de_horario":
+      return "Fuera de horario";
+    case "fuera_de_schedule":
+      return "Fuera del horario frecuente";
+    case "inactive":
+      return "Pase inactivo";
+    case "sin_permiso":
+      return "Sin permiso";
+    default:
+      return "No se puede registrar el acceso en este momento.";
+  }
+}
+
+function mapPeekFromRpc(data: unknown): PeekVisitAccessAction | null {
+  if (!data || typeof data !== "object") return null;
+  const o = data as Record<string, unknown>;
+  const action = String(o.action ?? "blocked") as VisitAccessAction;
+  const usageMode = (o.usage_mode != null ? String(o.usage_mode) : "single_use") as VisitUsageMode;
+  const presenceRaw = o.presence;
+  const presence =
+    presenceRaw === "outside" || presenceRaw === "inside"
+      ? (presenceRaw as VisitPresence)
+      : presenceRaw == null
+        ? null
+        : null;
+  return {
+    action,
+    usageMode,
+    presence,
+    canRegister: Boolean(o.can_register),
+    reason: o.reason != null ? String(o.reason) : null,
+    isDelinquent: Boolean(o.is_delinquent),
+  };
+}
+
+export async function peekVisitAccessAction(
+  supabase: SupabaseClient,
+  visitId: string
+): Promise<{ peek: PeekVisitAccessAction | null; error?: string }> {
+  const { data, error } = await supabase.rpc("peek_visit_access_action", {
+    p_visit_id: visitId,
+  });
+
+  if (error) {
+    return { peek: null, error: error.message };
+  }
+
+  const peek = mapPeekFromRpc(data);
+  if (!peek) {
+    return { peek: null, error: "Respuesta inválida del servidor." };
+  }
+  return { peek };
+}
+
+export async function registerVisitAccess(
+  supabase: SupabaseClient,
+  visitId: string,
+  plates?: string | null,
+  note?: string | null
+): Promise<RegisterVisitAccessResult> {
+  const { data, error } = await supabase.rpc("register_visit_access", {
+    p_visit_id: visitId,
+    p_plates: plates?.trim() || null,
+    p_note: note?.trim() || null,
+  });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!data || typeof data !== "object") {
+    throw new Error("Respuesta inválida al registrar acceso.");
+  }
+
+  const o = data as Record<string, unknown>;
+  const action = String(o.action ?? "entry");
+  if (action !== "entry" && action !== "exit") {
+    throw new Error("Acción de acceso no reconocida.");
+  }
+
+  const presenceRaw = o.presence;
+  const presence =
+    presenceRaw === "outside" || presenceRaw === "inside" ? (presenceRaw as VisitPresence) : null;
+
+  return {
+    ok: Boolean(o.ok ?? true),
+    action,
+    presence,
+    visitId: String(o.visit_id ?? visitId),
   };
 }
 

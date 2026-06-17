@@ -497,8 +497,8 @@ SELECT public.register_visit_access('<VISIT_CYCLE_ID>'::uuid, NULL, NULL);
 
 ## Próximos pasos (fuera de este commit)
 
-1. Aplicar migración en entorno de prueba local (`supabase migration up` local).
-2. Web: `peek_visit_access_action` + `register_visit_access` en `GuardScanClient`.
+1. ~~Aplicar migración en entorno de prueba local (`supabase migration up` local).~~
+2. ~~Web: `peek_visit_access_action` + `register_visit_access` en `GuardScanClient`.~~ **Hecho (web caseta `/guardia/scan`).**
 3. Mobile: paridad en `(security)/[id].tsx`.
 4. Bitácora: leer `visit_access_log` con `event_type`.
 5. Retirar rama compat `mark_visit_used` cuando todos los clientes usen entrada/salida explícita.
