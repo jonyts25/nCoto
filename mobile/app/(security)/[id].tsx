@@ -1,15 +1,16 @@
-import { View, Text, StyleSheet, ActivityIndicator, Alert, Pressable, Modal } from "react-native";
+import { View, Text, StyleSheet, ActivityIndicator, Alert, Pressable } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import {
   loadVisitForSecurityScreen,
-  markVisitUsed,
-  peekVisitResidentIsDelinquent,
+  mapAccessReasonToMessage,
+  peekVisitAccessAction,
+  registerVisitAccess,
 } from "@/src/features/visits/repo";
 import { AppButton } from "@/src/components/AppButton";
 import { ScreenHeader } from "@/src/components/ScreenHeader";
-import type { Visit } from "@/src/features/visits/types";
+import type { PeekVisitAccessAction, Visit } from "@/src/features/visits/types";
 import { canValidateVisitNow, formatVisitTimeRange } from "@/src/features/visits/validation";
 
 function typeLabel(v: Visit): string {
@@ -27,17 +28,36 @@ function typeLabel(v: Visit): string {
   }
 }
 
+function confirmButtonTitle(peek: PeekVisitAccessAction, visit: Visit): string {
+  if (peek.action === "exit") return "Registrar salida";
+  if (peek.usageMode === "cycle") return "Registrar entrada";
+  if ((visit.visitType ?? "eventual") === "paqueteria") return "Confirmar ingreso";
+  return "Registrar ingreso";
+}
+
+function successMessage(action: "entry" | "exit", visit: Visit): string {
+  if (action === "exit") return "Salida registrada.";
+  if ((visit.visitType ?? "eventual") === "frecuente") {
+    return "Entrada registrada. El pase frecuente sigue vigente según su horario.";
+  }
+  if ((visit.visitType ?? "eventual") === "paqueteria") {
+    return "Ingreso de paquetería registrado.";
+  }
+  return "Ingreso registrado.";
+}
+
 export default function SecurityVisitValidation() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const [visit, setVisit] = useState<Visit | null>(null);
+  const [accessPeek, setAccessPeek] = useState<PeekVisitAccessAction | null>(null);
   const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
   const [loadKind, setLoadKind] = useState<
     "ok" | "not_found" | "rls_denied" | "rpc_unavailable" | "error" | "idle"
   >("idle");
   const [loadDetail, setLoadDetail] = useState<string | null>(null);
-  const [blockedDelinquentVisit, setBlockedDelinquentVisit] = useState<Visit | null>(null);
-  const [delinquentCheckError, setDelinquentCheckError] = useState<string | null>(null);
+  const [entryBlockedMessage, setEntryBlockedMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id) {
@@ -48,11 +68,11 @@ export default function SecurityVisitValidation() {
 
     let cancelled = false;
     setVisit(null);
+    setAccessPeek(null);
     setLoading(true);
     setLoadKind("idle");
     setLoadDetail(null);
-    setBlockedDelinquentVisit(null);
-    setDelinquentCheckError(null);
+    setEntryBlockedMessage(null);
 
     void (async () => {
       const result = await loadVisitForSecurityScreen(String(id));
@@ -61,29 +81,58 @@ export default function SecurityVisitValidation() {
       switch (result.kind) {
         case "ok": {
           const v = result.visit;
-          const validation = canValidateVisitNow(v);
-          if (!validation.ok) {
+          const peekResult = await peekVisitAccessAction(String(id));
+          if (cancelled) return;
+
+          if (peekResult.error || !peekResult.peek) {
             setVisit(null);
             setLoadKind("error");
-            setLoadDetail(validation.reason);
+            setLoadDetail(peekResult.error ?? "No se pudo verificar el acceso del pase.");
             setLoading(false);
             return;
           }
 
-          const mora = await peekVisitResidentIsDelinquent(String(id));
-          if (cancelled) return;
-          if (mora.error) {
-            setDelinquentCheckError(mora.error);
+          const peek = peekResult.peek;
+          const allowsExit = peek.action === "exit" && peek.canRegister;
+
+          if (!allowsExit) {
+            const validation = canValidateVisitNow(v);
+            if (!validation.ok) {
+              setVisit(null);
+              setLoadKind("error");
+              setLoadDetail(validation.reason);
+              setLoading(false);
+              return;
+            }
           }
-          if (mora.delinquent) {
-            setBlockedDelinquentVisit(v);
-            setVisit(null);
+
+          if (!peek.canRegister && peek.reason === "mora" && peek.action !== "exit") {
+            setVisit(v);
+            setAccessPeek(peek);
+            setEntryBlockedMessage("Unidad en mora: no se puede registrar entrada.");
             setLoadKind("ok");
             setLoading(false);
             return;
           }
 
+          if (!peek.canRegister && peek.action !== "exit") {
+            setVisit(null);
+            setLoadKind("error");
+            setLoadDetail(mapAccessReasonToMessage(peek.reason));
+            setLoading(false);
+            return;
+          }
+
+          if (peek.action === "blocked") {
+            setVisit(null);
+            setLoadKind("error");
+            setLoadDetail(mapAccessReasonToMessage(peek.reason));
+            setLoading(false);
+            return;
+          }
+
           setVisit(v);
+          setAccessPeek(peek);
           setLoadKind("ok");
           setLoading(false);
           return;
@@ -118,49 +167,39 @@ export default function SecurityVisitValidation() {
   }, [id]);
 
   const handleConfirm = async () => {
-    if (!id || !visit) return;
-    const gate = canValidateVisitNow(visit);
-    if (!gate.ok) {
-      Alert.alert("No permitido", gate.reason);
+    if (!id || !visit || !accessPeek || submitting) return;
+    if (entryBlockedMessage) {
+      Alert.alert("No permitido", entryBlockedMessage);
       return;
     }
+    if (!accessPeek.canRegister || accessPeek.action === "blocked") {
+      Alert.alert("No permitido", mapAccessReasonToMessage(accessPeek.reason));
+      return;
+    }
+
+    const allowsExit = accessPeek.action === "exit" && accessPeek.canRegister;
+    if (!allowsExit) {
+      const gate = canValidateVisitNow(visit);
+      if (!gate.ok) {
+        Alert.alert("No permitido", gate.reason);
+        return;
+      }
+    }
+
     try {
-      setLoading(true);
-      await markVisitUsed(id);
-      setLoading(false);
-      const msg =
-        (visit.visitType ?? "eventual") === "frecuente"
-          ? "Acceso registrado. El pase frecuente sigue vigente según su horario."
-          : (visit.visitType ?? "eventual") === "paqueteria"
-            ? "Ingreso de paquetería registrado."
-            : "El pase ha sido registrado correctamente.";
-      Alert.alert("Acceso concedido", msg, [
+      setSubmitting(true);
+      const result = await registerVisitAccess(id, visit.plates, visit.note);
+      const msg = successMessage(result.action, visit);
+      Alert.alert(result.action === "exit" ? "Salida registrada" : "Ingreso registrado", msg, [
         { text: "OK", onPress: () => router.replace("/(security)" as any) },
       ]);
-    } catch {
-      Alert.alert("Error", "No se pudo registrar la entrada.");
-      setLoading(false);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "No se pudo registrar el acceso.";
+      Alert.alert("Error", message);
+    } finally {
+      setSubmitting(false);
     }
   };
-
-  if (blockedDelinquentVisit) {
-    return (
-      <Modal visible animationType="fade" presentationStyle="fullScreen">
-        <SafeAreaView style={styles.blockRoot} edges={["top", "left", "right", "bottom"]}>
-          <Text style={styles.blockTitle}>ACCESO DENEGADO</Text>
-          <Text style={styles.blockSub}>Unidad en mora — contactar administración</Text>
-          <Text style={styles.blockBody}>
-            El ingreso queda bloqueado por adeudos del residente titular del pase. Visitante:{" "}
-            {blockedDelinquentVisit.guestName}
-          </Text>
-          <Text style={styles.blockId}>Pase {String(id).slice(0, 8)}…</Text>
-          <Pressable style={styles.blockBtn} onPress={() => router.replace("/(security)" as any)}>
-            <Text style={styles.blockBtnText}>Volver al escáner</Text>
-          </Pressable>
-        </SafeAreaView>
-      </Modal>
-    );
-  }
 
   if (loading && loadKind === "idle") {
     return (
@@ -232,7 +271,7 @@ export default function SecurityVisitValidation() {
     );
   }
 
-  if (!visit) {
+  if (!visit || !accessPeek) {
     return (
       <SafeAreaView style={styles.centered} edges={["top", "left", "right", "bottom"]}>
         <ScreenHeader title="Validación" />
@@ -242,17 +281,38 @@ export default function SecurityVisitValidation() {
   }
 
   const gate = canValidateVisitNow(visit);
-  const canConfirm = visit.status === "active" && gate.ok;
+  const canConfirm =
+    accessPeek.canRegister &&
+    accessPeek.action !== "blocked" &&
+    !entryBlockedMessage &&
+    (accessPeek.action === "exit" || (visit.status === "active" && gate.ok));
 
   return (
     <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
       <ScreenHeader title="Validación de pase" />
-      {delinquentCheckError ? (
+      {entryBlockedMessage ? (
+        <View style={styles.blockBanner}>
+          <Text style={styles.blockBannerText}>{entryBlockedMessage}</Text>
+        </View>
+      ) : null}
+      {accessPeek.isDelinquent && accessPeek.action === "exit" ? (
         <View style={styles.warnBanner}>
-          <Text style={styles.warnBannerText}>Aviso morosidad (verificación): {delinquentCheckError}</Text>
+          <Text style={styles.warnBannerText}>Unidad en mora — se permite registrar salida.</Text>
         </View>
       ) : null}
       <View style={styles.card}>
+        {accessPeek.usageMode === "cycle" && accessPeek.presence ? (
+          <View
+            style={[
+              styles.presenceBadge,
+              accessPeek.presence === "inside" ? styles.presenceInside : styles.presenceOutside,
+            ]}
+          >
+            <Text style={styles.presenceBadgeText}>
+              {accessPeek.presence === "inside" ? "DENTRO" : "FUERA"}
+            </Text>
+          </View>
+        ) : null}
         <Text style={styles.label}>Tipo:</Text>
         <Text style={styles.value}>{typeLabel(visit)}</Text>
         <Text style={styles.label}>Visitante:</Text>
@@ -273,15 +333,22 @@ export default function SecurityVisitValidation() {
         <Text style={[styles.value, { color: visit.status === "active" ? "#34C759" : "#FF3B30" }]}>
           {visit.status === "active" ? "Válido" : "Pase expirado o usado"}
         </Text>
-        {!gate.ok && <Text style={styles.warn}>{gate.reason}</Text>}
+        {!gate.ok && accessPeek.action !== "exit" && (
+          <Text style={styles.warn}>{gate.reason}</Text>
+        )}
+        {!accessPeek.canRegister && accessPeek.reason && accessPeek.action !== "exit" ? (
+          <Text style={styles.warn}>{mapAccessReasonToMessage(accessPeek.reason)}</Text>
+        ) : null}
       </View>
 
-      {visit.status === "active" && canConfirm && (
+      {canConfirm && (
         <AppButton
-          title={(visit.visitType ?? "eventual") === "paqueteria" ? "Confirmar ingreso" : "Confirmar entrada"}
+          title={confirmButtonTitle(accessPeek, visit)}
           onPress={handleConfirm}
+          disabled={submitting}
         />
       )}
+      {submitting ? <ActivityIndicator style={{ marginTop: 16 }} size="small" color="#FF3B30" /> : null}
     </SafeAreaView>
   );
 }
@@ -306,32 +373,18 @@ const styles = StyleSheet.create({
     borderColor: "#FF3B30",
   },
   secondaryBtnText: { color: "#FF3B30", fontWeight: "600", fontSize: 16 },
-  blockRoot: {
-    flex: 1,
-    backgroundColor: "#B71C1C",
-    padding: 24,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  blockTitle: {
-    color: "#FFEB3B",
-    fontSize: 28,
-    fontWeight: "900",
-    textAlign: "center",
-    textTransform: "uppercase",
-    marginBottom: 16,
-  },
-  blockSub: { color: "#fff", fontSize: 20, fontWeight: "700", textAlign: "center", marginBottom: 20 },
-  blockBody: { color: "rgba(255,255,255,0.95)", fontSize: 16, lineHeight: 24, textAlign: "center" },
-  blockId: { color: "rgba(255,255,255,0.85)", fontSize: 13, marginTop: 12 },
-  blockBtn: {
-    marginTop: 32,
-    backgroundColor: "#fff",
-    paddingVertical: 14,
-    paddingHorizontal: 28,
-    borderRadius: 10,
-  },
-  blockBtnText: { color: "#B71C1C", fontWeight: "800", fontSize: 16 },
+  blockBanner: { backgroundColor: "#FFEBEE", padding: 12, borderRadius: 10, marginBottom: 12 },
+  blockBannerText: { color: "#B71C1C", fontSize: 14, textAlign: "center", fontWeight: "600" },
   warnBanner: { backgroundColor: "#FFF3E0", padding: 12, borderRadius: 10, marginBottom: 12 },
   warnBannerText: { color: "#E65100", fontSize: 13, textAlign: "center" },
+  presenceBadge: {
+    alignSelf: "flex-start",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    marginBottom: 12,
+  },
+  presenceOutside: { backgroundColor: "#E3F2FD" },
+  presenceInside: { backgroundColor: "#E8F5E9" },
+  presenceBadgeText: { fontSize: 14, fontWeight: "800", color: "#333" },
 });
