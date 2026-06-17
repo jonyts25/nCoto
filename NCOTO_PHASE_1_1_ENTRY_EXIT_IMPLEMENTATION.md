@@ -38,6 +38,8 @@ Fase 1.1 introduce **ciclos entrada/salida** para pases `cycle` (`frecuente`, `s
 |---------|------|-------|
 | `usage_mode` | `visit_usage_mode NOT NULL DEFAULT 'single_use'` | Backfill por `visit_type` |
 | `presence` | `visit_presence` | Solo `cycle`; default `outside` |
+| `start_time` | `time` | Ventana horaria diaria (ADD IF NOT EXISTS) |
+| `end_time` | `time` | Ventana horaria diaria (ADD IF NOT EXISTS) |
 
 ### Columnas `visit_access_log`
 
@@ -59,6 +61,30 @@ Fase 1.1 introduce **ciclos entrada/salida** para pases `cycle` (`frecuente`, `s
 - `_visit_resident_is_delinquent(uuid)`
 - `_visit_access_caller_context()`
 - `_assert_visit_access_caller(uuid)`
+- `_visit_temporal_access_check(visits, visit_access_event)` — vigencia server-side
+- `_visit_temporal_access_raise(text)` — convierte código → EXCEPTION
+
+### Validación temporal server-side
+
+Paridad con `canValidateVisitNow()` del cliente. **No confía en UI.**
+
+| Acción | Reglas |
+|--------|--------|
+| **entry** | `status = active`; fin de vigencia (`valid_day` / `valid_until`); `valid_day` hoy (eventual/servicio/paquetería); `start_time`–`end_time` si existen; `schedule` JSON para `frecuente` |
+| **exit** | Solo `status = active`; **no** valida vencimiento ni horario |
+
+**Timezone canónica:** `America/Mexico_City` (documentada en migración). El cliente usa hora local del dispositivo; puede haber divergencia de ±1 h en fronteras DST — aceptado en v1.1.
+
+**Códigos `reason` en `peek_visit_access_action`:**
+
+| Código | Significado |
+|--------|-------------|
+| `inactive` | `status` ≠ `active` |
+| `pase_vencido` | Fin de vigencia calendario superado |
+| `fuera_de_dia` | `valid_day` ≠ hoy (MX) |
+| `fuera_de_horario` | Fuera de `start_time`–`end_time` |
+| `fuera_de_schedule` | Frecuente fuera de slot semanal |
+| `mora` | Entrada bloqueada por morosidad |
 
 ### Triggers
 
@@ -69,9 +95,15 @@ Fase 1.1 introduce **ciclos entrada/salida** para pases `cycle` (`frecuente`, `s
 
 ### RLS `visit_access_log`
 
+- `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` (idempotente en migración).
 - **Staff** (`guard`, `admin`, `coto_admin`): SELECT logs del coto operativo.
 - **Residente**: SELECT solo logs de visitas donde `visits.resident_id = auth.uid()`.
 - **REVOKE** INSERT/UPDATE/DELETE a `authenticated` y `anon` (escritura solo vía RPC).
+
+### Grants (hardening)
+
+- `REVOKE ALL ... FROM PUBLIC` y `FROM anon` en `register_visit_access`, `peek_visit_access_action`, `mark_visit_used`.
+- Helpers internos sin `GRANT` a `authenticated`.
 
 ---
 
@@ -138,7 +170,8 @@ Esto evita que un guardia con cliente v1 “saque” a alguien al re-escanear un
 | Riesgo | Severidad | Mitigación |
 |--------|-----------|------------|
 | **Migración no aplicada en remoto** | — | Solo archivo local; no `db push` |
-| **Clientes v1 + cycle inside** | Media | Rama compat en `mark_visit_used` |
+| **Clientes v1 + cycle inside** | Media | Rama compat en `mark_visit_used` (sin validación temporal) |
+| **TZ servidor vs dispositivo** | Baja | `America/Mexico_City` fijo en RPC |
 | **Backfill `presence = outside`** | Baja | Visitas ya “dentro” en la realidad no se infieren; primer escaneo post-migración = entrada |
 | **`peek_visit_resident_is_delinquent` solo guard** | Baja | UI v1 sigue usándola; Fase 1.1 UI usará `peek_visit_access_action` |
 | **Trigger + RPC** | Baja | Flag `ncoto.allow_access_state_update` en transacción RPC |
@@ -359,6 +392,105 @@ SELECT public.mark_visit_used('22222222-2222-4222-8222-222222222202'::uuid);
 UPDATE public.visits SET presence = 'inside'
 WHERE id = '22222222-2222-4222-8222-222222222202'::uuid;
 -- Esperado: ERROR 'usage_mode y presence solo se actualizan vía registro de acceso'
+```
+
+---
+
+## SQL manual — validación temporal (Fase 1.1)
+
+**Pre:** JWT guardia + visitas de prueba. Usar `set_config('ncoto.allow_access_state_update','1',true)` para ajustar `presence` en setup con service_role.
+
+### T8) entry con `valid_until` vencido → bloqueado
+
+```sql
+UPDATE public.visits
+SET valid_until = (now() - interval '2 days'),
+    valid_day = (current_date - 2),
+    status = 'active',
+    presence = 'outside'
+WHERE id = '<VISIT_CYCLE_ID>';
+
+SELECT public.register_visit_access('<VISIT_CYCLE_ID>'::uuid, NULL, NULL);
+-- Esperado: ERROR pase_vencido
+
+SELECT public.peek_visit_access_action('<VISIT_CYCLE_ID>'::uuid);
+-- Esperado: action=blocked, reason=pase_vencido, can_register=false
+```
+
+### T9) exit con `valid_until` vencido pero `presence = inside` → permitido
+
+```sql
+SELECT set_config('ncoto.allow_access_state_update', '1', true);
+UPDATE public.visits
+SET valid_until = (now() - interval '2 days'),
+    valid_day = (current_date - 2),
+    status = 'active',
+    presence = 'inside',
+    usage_mode = 'cycle'
+WHERE id = '<VISIT_CYCLE_ID>';
+
+SELECT public.register_visit_access('<VISIT_CYCLE_ID>'::uuid, NULL, NULL);
+-- Esperado: OK, action=exit, presence=outside
+
+SELECT public.peek_visit_access_action('<VISIT_CYCLE_ID>'::uuid);
+-- Tras salida: action=entry; si sigue vencido → reason=pase_vencido en entrada
+```
+
+### T10) entry fuera de `valid_day` → bloqueado
+
+```sql
+UPDATE public.visits
+SET valid_day = current_date - 1,
+    valid_until = (current_date + 1)::timestamptz,
+    status = 'active',
+    presence = 'outside',
+    visit_type = 'eventual',
+    usage_mode = 'single_use'
+WHERE id = '<VISIT_EVENTUAL_ID>';
+
+SELECT public.register_visit_access('<VISIT_EVENTUAL_ID>'::uuid, NULL, NULL);
+-- Esperado: ERROR (pase_vencido o fuera_de_dia según orden de checks; eventual ayer → pase_vencido si valid_day pasado)
+
+SELECT public.peek_visit_access_action('<VISIT_EVENTUAL_ID>'::uuid);
+-- Esperado: reason en {pase_vencido, fuera_de_dia}
+```
+
+### T11) entry fuera de `start_time`/`end_time` → bloqueado
+
+```sql
+UPDATE public.visits
+SET valid_day = current_date,
+    start_time = '06:00:00'::time,
+    end_time = '07:00:00'::time,
+    status = 'active',
+    presence = 'outside',
+    visit_type = 'servicio',
+    usage_mode = 'cycle'
+WHERE id = '<VISIT_CYCLE_ID>';
+-- Ejecutar fuera de 06:00–07:00 America/Mexico_City
+
+SELECT public.register_visit_access('<VISIT_CYCLE_ID>'::uuid, NULL, NULL);
+-- Esperado: ERROR fuera_de_horario
+
+SELECT public.peek_visit_access_action('<VISIT_CYCLE_ID>'::uuid);
+-- Esperado: reason=fuera_de_horario
+```
+
+### T12) frecuente fuera de `schedule` → bloqueado
+
+```sql
+UPDATE public.visits
+SET visit_type = 'frecuente',
+    usage_mode = 'cycle',
+    presence = 'outside',
+    status = 'active',
+    valid_day = NULL,
+    schedule = '[{"weekday": 1, "start": "09:00", "end": "10:00"}]'::jsonb
+WHERE id = '<VISIT_CYCLE_ID>';
+-- Ejecutar un día/hora que no sea lunes 09:00–10:00 MX
+
+SELECT public.register_visit_access('<VISIT_CYCLE_ID>'::uuid, NULL, NULL);
+-- Esperado: ERROR fuera_de_schedule
 ```
 
 ---

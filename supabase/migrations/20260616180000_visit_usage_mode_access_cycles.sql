@@ -37,10 +37,22 @@ ALTER TABLE public.visits
 ALTER TABLE public.visits
   ADD COLUMN IF NOT EXISTS presence public.visit_presence;
 
+ALTER TABLE public.visits
+  ADD COLUMN IF NOT EXISTS start_time time;
+
+ALTER TABLE public.visits
+  ADD COLUMN IF NOT EXISTS end_time time;
+
 COMMENT ON COLUMN public.visits.usage_mode IS
   'single_use: un escaneo consume el pase. cycle: alterna entrada/salida (Fase 1.1).';
 COMMENT ON COLUMN public.visits.presence IS
   'Solo usage_mode=cycle: outside|inside. NULL en single_use.';
+COMMENT ON COLUMN public.visits.start_time IS
+  'Ventana horaria diaria opcional (TIME). Paridad con validación cliente.';
+COMMENT ON COLUMN public.visits.end_time IS
+  'Ventana horaria diaria opcional (TIME). Paridad con validación cliente.';
+
+-- Vigencia temporal en RPC: timezone canónica America/Mexico_City (ver _visit_temporal_access_check).
 
 -- ---------------------------------------------------------------------------
 -- 3) Backfill usage_mode y presence
@@ -155,6 +167,148 @@ BEGIN
 END;
 $$;
 
+-- Validación temporal server-side (paridad canValidateVisitNow en cliente).
+-- Retorna NULL si OK; códigos: inactive, pase_vencido, fuera_de_dia, fuera_de_horario, fuera_de_schedule.
+-- Salida (exit): solo exige status active; no valida vigencia ni horario.
+CREATE OR REPLACE FUNCTION public._visit_temporal_access_check(
+  p_visit public.visits,
+  p_action public.visit_access_event
+)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path TO public
+AS $$
+DECLARE
+  v_local_ts timestamp;
+  v_local_date date;
+  v_local_dow int;
+  v_local_mins int;
+  v_end_boundary timestamptz;
+  v_elem jsonb;
+  v_weekday int;
+  v_start_mins int;
+  v_end_mins int;
+  v_in_slot boolean;
+BEGIN
+  IF p_action = 'exit'::public.visit_access_event THEN
+    IF p_visit.status IS DISTINCT FROM 'active' THEN
+      RETURN 'inactive';
+    END IF;
+    RETURN NULL;
+  END IF;
+
+  -- entry
+  IF p_visit.status IS DISTINCT FROM 'active' THEN
+    RETURN 'inactive';
+  END IF;
+
+  v_local_ts := timezone('America/Mexico_City', now());
+  v_local_date := v_local_ts::date;
+  v_local_dow := EXTRACT(DOW FROM v_local_ts)::int;
+  v_local_mins := EXTRACT(HOUR FROM v_local_ts)::int * 60 + EXTRACT(MINUTE FROM v_local_ts)::int;
+
+  IF p_visit.valid_day IS NOT NULL THEN
+    v_end_boundary :=
+      ((p_visit.valid_day + 1)::timestamp AT TIME ZONE 'America/Mexico_City') - interval '1 microsecond';
+    IF now() > v_end_boundary THEN
+      RETURN 'pase_vencido';
+    END IF;
+  ELSIF p_visit.valid_until IS NOT NULL THEN
+    v_end_boundary :=
+      (((timezone('America/Mexico_City', p_visit.valid_until))::date + 1)::timestamp
+        AT TIME ZONE 'America/Mexico_City') - interval '1 microsecond';
+    IF now() > v_end_boundary THEN
+      RETURN 'pase_vencido';
+    END IF;
+  END IF;
+
+  IF p_visit.visit_type = 'frecuente' THEN
+    IF p_visit.schedule IS NULL
+       OR jsonb_typeof(p_visit.schedule) IS DISTINCT FROM 'array'
+       OR jsonb_array_length(p_visit.schedule) = 0 THEN
+      RETURN 'fuera_de_schedule';
+    END IF;
+
+    v_in_slot := false;
+    FOR v_elem IN SELECT value FROM jsonb_array_elements(p_visit.schedule)
+    LOOP
+      BEGIN
+        v_weekday := (v_elem->>'weekday')::int;
+        v_start_mins :=
+          split_part(v_elem->>'start', ':', 1)::int * 60 + split_part(v_elem->>'start', ':', 2)::int;
+        v_end_mins :=
+          split_part(v_elem->>'end', ':', 1)::int * 60 + split_part(v_elem->>'end', ':', 2)::int;
+      EXCEPTION
+        WHEN OTHERS THEN
+          CONTINUE;
+      END;
+
+      IF v_weekday = v_local_dow
+         AND v_local_mins >= v_start_mins
+         AND v_local_mins <= v_end_mins THEN
+        v_in_slot := true;
+        EXIT;
+      END IF;
+    END LOOP;
+
+    IF NOT v_in_slot THEN
+      RETURN 'fuera_de_schedule';
+    END IF;
+
+    RETURN NULL;
+  END IF;
+
+  IF p_visit.visit_type IN ('eventual', 'servicio', 'paqueteria') THEN
+    IF p_visit.valid_day IS NOT NULL AND p_visit.valid_day <> v_local_date THEN
+      RETURN 'fuera_de_dia';
+    END IF;
+  END IF;
+
+  IF p_visit.start_time IS NOT NULL AND p_visit.end_time IS NOT NULL THEN
+    v_start_mins :=
+      EXTRACT(HOUR FROM p_visit.start_time)::int * 60 + EXTRACT(MINUTE FROM p_visit.start_time)::int;
+    v_end_mins :=
+      EXTRACT(HOUR FROM p_visit.end_time)::int * 60 + EXTRACT(MINUTE FROM p_visit.end_time)::int;
+
+    IF v_start_mins >= v_end_mins THEN
+      RETURN 'fuera_de_horario';
+    END IF;
+
+    IF v_local_mins < v_start_mins OR v_local_mins > v_end_mins THEN
+      RETURN 'fuera_de_horario';
+    END IF;
+  END IF;
+
+  RETURN NULL;
+END;
+$$;
+
+COMMENT ON FUNCTION public._visit_temporal_access_check(public.visits, public.visit_access_event) IS
+  'Interno: vigencia/horario en servidor (America/Mexico_City). exit solo exige active.';
+
+CREATE OR REPLACE FUNCTION public._visit_temporal_access_raise(p_reason text)
+RETURNS void
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+BEGIN
+  IF p_reason IS NULL OR btrim(p_reason) = '' THEN
+    RETURN;
+  END IF;
+
+  RAISE EXCEPTION '%', CASE p_reason
+    WHEN 'inactive' THEN 'El pase no está activo'
+    WHEN 'pase_vencido' THEN 'La vigencia del pase ya expiró'
+    WHEN 'fuera_de_dia' THEN 'Fuera del día autorizado para el pase'
+    WHEN 'fuera_de_horario' THEN 'Fuera del horario permitido'
+    WHEN 'fuera_de_schedule' THEN 'Fuera del día u horario de la visita frecuente'
+    ELSE 'Acceso bloqueado: ' || p_reason
+  END USING ERRCODE = 'P0001';
+END;
+$$;
+
 -- ---------------------------------------------------------------------------
 -- 6) register_visit_access — RPC principal Fase 1.1
 -- ---------------------------------------------------------------------------
@@ -174,6 +328,7 @@ DECLARE
   v_action public.visit_access_event;
   v_new_presence public.visit_presence;
   v_guard_id uuid;
+  v_temporal_reason text;
 BEGIN
   v_guard_id := auth.uid();
   IF v_guard_id IS NULL THEN
@@ -187,9 +342,19 @@ BEGIN
 
   PERFORM public._assert_visit_access_caller(r.coto_id);
 
-  IF r.status IS DISTINCT FROM 'active' THEN
-    RAISE EXCEPTION 'El pase no está activo' USING ERRCODE = 'P0001';
+  -- Acción prevista (entrada/salida) antes de validar vigencia y mora.
+  IF r.usage_mode = 'single_use'::public.visit_usage_mode THEN
+    v_action := 'entry'::public.visit_access_event;
+  ELSIF COALESCE(r.presence, 'outside'::public.visit_presence) = 'outside'::public.visit_presence THEN
+    v_action := 'entry'::public.visit_access_event;
+  ELSIF r.presence = 'inside'::public.visit_presence THEN
+    v_action := 'exit'::public.visit_access_event;
+  ELSE
+    RAISE EXCEPTION 'Estado de presencia inválido' USING ERRCODE = 'P0001';
   END IF;
+
+  v_temporal_reason := public._visit_temporal_access_check(r, v_action);
+  PERFORM public._visit_temporal_access_raise(v_temporal_reason);
 
   v_delinquent := public._visit_resident_is_delinquent(p_visit_id);
 
@@ -221,12 +386,11 @@ BEGIN
     END IF;
 
   ELSIF r.usage_mode = 'cycle'::public.visit_usage_mode THEN
-    IF COALESCE(r.presence, 'outside'::public.visit_presence) = 'outside'::public.visit_presence THEN
+    IF v_action = 'entry'::public.visit_access_event THEN
       IF v_delinquent THEN
         RAISE EXCEPTION 'Ingreso bloqueado: unidad en mora' USING ERRCODE = 'P0001';
       END IF;
 
-      v_action := 'entry'::public.visit_access_event;
       v_new_presence := 'inside'::public.visit_presence;
 
       PERFORM set_config('ncoto.allow_access_state_update', '1', true);
@@ -240,9 +404,8 @@ BEGIN
         note = COALESCE(NULLIF(btrim(p_note), ''), note)
       WHERE id = p_visit_id;
 
-    ELSIF r.presence = 'inside'::public.visit_presence THEN
-      -- Salida: mora no bloquea (Fase 1.1)
-      v_action := 'exit'::public.visit_access_event;
+    ELSE
+      -- Salida: mora no bloquea (Fase 1.1); vigencia ya validada (solo active).
       v_new_presence := 'outside'::public.visit_presence;
 
       PERFORM set_config('ncoto.allow_access_state_update', '1', true);
@@ -253,9 +416,6 @@ BEGIN
         plates = COALESCE(NULLIF(btrim(p_plates), ''), plates),
         note = COALESCE(NULLIF(btrim(p_note), ''), note)
       WHERE id = p_visit_id;
-
-    ELSE
-      RAISE EXCEPTION 'Estado de presencia inválido' USING ERRCODE = 'P0001';
     END IF;
 
   ELSE
@@ -351,7 +511,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.mark_visit_used(uuid) IS
-  'Compat v1: delega en register_visit_access salvo cycle+inside (solo actualiza last_access_at). Requiere guard/admin/coto_admin.';
+  'Compat v1: delega en register_visit_access salvo cycle+inside (solo last_access_at; sin validación temporal). Requiere guard/admin/coto_admin.';
 
 -- ---------------------------------------------------------------------------
 -- 8) peek_visit_access_action — preview para UI (Fase 1.1)
@@ -367,9 +527,11 @@ DECLARE
   r public.visits%ROWTYPE;
   v_delinquent boolean;
   v_presence public.visit_presence;
-  v_action text;
+  v_action public.visit_access_event;
+  v_action_text text;
   v_can boolean := false;
   v_reason text := NULL;
+  v_temporal_reason text;
 BEGIN
   SELECT * INTO r FROM public.visits WHERE id = p_visit_id;
   IF NOT FOUND THEN
@@ -387,60 +549,51 @@ BEGIN
 
   v_delinquent := public._visit_resident_is_delinquent(p_visit_id);
 
-  IF r.status IS DISTINCT FROM 'active' THEN
+  IF r.usage_mode = 'single_use'::public.visit_usage_mode THEN
+    v_action := 'entry'::public.visit_access_event;
+    v_action_text := 'entry';
+    v_presence := NULL;
+  ELSE
+    v_presence := COALESCE(r.presence, 'outside'::public.visit_presence);
+    IF v_presence = 'outside'::public.visit_presence THEN
+      v_action := 'entry'::public.visit_access_event;
+      v_action_text := 'entry';
+    ELSE
+      v_action := 'exit'::public.visit_access_event;
+      v_action_text := 'exit';
+    END IF;
+  END IF;
+
+  v_temporal_reason := public._visit_temporal_access_check(r, v_action);
+  IF v_temporal_reason IS NOT NULL THEN
     RETURN jsonb_build_object(
       'action', 'blocked',
       'usage_mode', r.usage_mode::text,
       'presence', CASE WHEN r.presence IS NULL THEN NULL ELSE r.presence::text END,
       'is_delinquent', v_delinquent,
       'can_register', false,
-      'reason', 'El pase no está activo'
+      'reason', v_temporal_reason
     );
   END IF;
 
-  IF r.usage_mode = 'single_use'::public.visit_usage_mode THEN
-    v_action := 'entry';
-    IF v_delinquent THEN
-      v_can := false;
-      v_reason := 'Ingreso bloqueado: unidad en mora';
-    ELSE
-      v_can := true;
-    END IF;
-
+  IF v_action = 'entry'::public.visit_access_event AND v_delinquent THEN
     RETURN jsonb_build_object(
-      'action', v_action,
+      'action', 'blocked',
       'usage_mode', r.usage_mode::text,
-      'presence', NULL,
-      'is_delinquent', v_delinquent,
-      'can_register', v_can,
-      'reason', v_reason
+      'presence', CASE WHEN v_presence IS NULL THEN NULL ELSE v_presence::text END,
+      'is_delinquent', true,
+      'can_register', false,
+      'reason', 'mora'
     );
-  END IF;
-
-  -- cycle
-  v_presence := COALESCE(r.presence, 'outside'::public.visit_presence);
-
-  IF v_presence = 'outside'::public.visit_presence THEN
-    v_action := 'entry';
-    IF v_delinquent THEN
-      v_can := false;
-      v_reason := 'Ingreso bloqueado: unidad en mora';
-    ELSE
-      v_can := true;
-    END IF;
-  ELSE
-    v_action := 'exit';
-    v_can := true;
-    v_reason := NULL;
   END IF;
 
   RETURN jsonb_build_object(
-    'action', v_action,
+    'action', v_action_text,
     'usage_mode', r.usage_mode::text,
-    'presence', v_presence::text,
+    'presence', CASE WHEN v_presence IS NULL THEN NULL ELSE v_presence::text END,
     'is_delinquent', v_delinquent,
-    'can_register', v_can,
-    'reason', v_reason
+    'can_register', true,
+    'reason', NULL
   );
 END;
 $$;
@@ -508,6 +661,8 @@ CREATE TRIGGER trg_visits_set_default_usage_mode
 -- ---------------------------------------------------------------------------
 -- 10) RLS visit_access_log
 -- ---------------------------------------------------------------------------
+ALTER TABLE public.visit_access_log ENABLE ROW LEVEL SECURITY;
+
 DROP POLICY IF EXISTS "visit_access_log_tenant" ON public.visit_access_log;
 DROP POLICY IF EXISTS "visit_access_log_tenant_select" ON public.visit_access_log;
 
@@ -553,10 +708,17 @@ REVOKE INSERT, UPDATE, DELETE ON public.visit_access_log FROM anon;
 -- ---------------------------------------------------------------------------
 -- 11) Grants
 -- ---------------------------------------------------------------------------
+REVOKE ALL ON FUNCTION public.mark_visit_used(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.mark_visit_used(uuid) FROM anon;
+REVOKE ALL ON FUNCTION public.register_visit_access(uuid, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.register_visit_access(uuid, text, text) FROM anon;
+REVOKE ALL ON FUNCTION public.peek_visit_access_action(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.peek_visit_access_action(uuid) FROM anon;
 REVOKE ALL ON FUNCTION public._visit_resident_is_delinquent(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public._visit_access_caller_context() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public._assert_visit_access_caller(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public._visit_temporal_access_check(public.visits, public.visit_access_event) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public._visit_temporal_access_raise(text) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION public.register_visit_access(uuid, text, text) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.register_visit_access(uuid, text, text) TO service_role;
