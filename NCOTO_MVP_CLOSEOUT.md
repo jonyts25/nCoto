@@ -117,6 +117,22 @@ Marcar **todos** antes de firmar piloto comercial:
 
 ---
 
+## Post-MVP inmediato: ciclos entrada/salida
+
+**No es parte del MVP v1 demo.** Queda fuera del guión de piloto y de la promesa comercial congelada.
+
+| Aspecto | Detalle |
+|---------|---------|
+| **Fase** | 1.1 — posterior al cierre v1, antes de Fase 2 (comunicación) |
+| **Aplica a** | Pases **frecuentes**, **proveedores de servicio** y visitas recurrentes donde importa saber quién sigue dentro |
+| **Regla de negocio** | No puede volver a entrar si no registró **salida** (ciclo entrada → salida cerrado) |
+| **Beneficio operativo** | La caseta sabe **quién está dentro** del fraccionamiento en un momento dado |
+| **Estado técnico** | **Requiere diseño técnico** antes de implementar (modelo de estado, UI caseta, RPCs, impacto en bitácora) |
+
+No implementar entrada/salida hasta cerrar piloto v1 y documentar diseño (tablas, transiciones, excepciones guardia).
+
+---
+
 ## Próximos pasos después del cierre
 
 Orden sugerido **post-piloto v1** (Fase 2+):

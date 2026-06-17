@@ -138,6 +138,7 @@ Mínimo **3 cuentas** en Supabase Auth + filas en `profiles`:
 - [ ] `cd web && npm run dev` → `/` muestra landing nCoto con enlaces
 - [ ] `cd mobile && npx expo start` → app carga en dispositivo demo
 - [ ] Reloj del sistema = **fecha de hoy** (afecta `validDay`)
+- [ ] **Realtime:** Supabase Dashboard → Database → Replication → confirmar que `properties` está en publicación `supabase_realtime`. Si no está: agregar tabla y esperar 30 segundos.
 
 ### Datos
 

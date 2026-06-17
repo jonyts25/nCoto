@@ -29,6 +29,8 @@ import { EmergencyConfirmControl } from "@/src/components/EmergencyConfirmContro
 import { Ionicons } from "@expo/vector-icons";
 
 const ACTION_MIN_H = 132;
+/** MVP v1 pre-demo: emergencia sin backend — no mostrar en UI. */
+const SHOW_EMERGENCY_BUTTON = false;
 
 function pickActiveVisit(visits: Visit[]): Visit | null {
   const now = new Date();
@@ -234,9 +236,11 @@ export default function ResidentIndex() {
                   />
                 </View>
               </View>
-              <View style={[styles.actionCell, { minHeight: ACTION_MIN_H }]}>
-                <EmergencyConfirmControl variant="compact" onConfirmed={onEmergencyConfirmed} />
-              </View>
+              {SHOW_EMERGENCY_BUTTON ? (
+                <View style={[styles.actionCell, { minHeight: ACTION_MIN_H }]}>
+                  <EmergencyConfirmControl variant="compact" onConfirmed={onEmergencyConfirmed} />
+                </View>
+              ) : null}
             </View>
 
             {isDelinquent ? (

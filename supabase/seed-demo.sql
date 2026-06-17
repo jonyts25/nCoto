@@ -4,11 +4,11 @@
 -- NO ejecutar en producción sin revisión explícita.
 -- NO crea usuarios en auth.users (Supabase Auth requiere Dashboard o Admin API).
 --
--- CÓMO USAR:
---   1. Supabase Dashboard → SQL Editor → ejecutar secciones 1–2.
---   2. Authentication → Users → crear 3 usuarios (Auto Confirm ✅).
---   3. Copiar UUID de cada usuario y completar sección 3.
---   4. Ejecutar verificación sección 4.
+-- CÓMO USAR (ver guía completa al final del archivo):
+--   A. SQL Editor → secciones 1–2.
+--   B. Authentication → 3 usuarios demo (Auto Confirm ✅).
+--   C. Descomentar UPDATE sección 5 con UUID reales.
+--   D. Verificación sección 6.
 --
 -- Referencia ampliada: NCOTO_DEMO_SETUP_AND_SCRIPT.md, NCOTO_DEMO_RUNBOOK.md
 
@@ -49,73 +49,11 @@ WHERE NOT EXISTS (
     AND lower(btrim(p.house_number)) = lower(btrim(v.house_number))
 );
 
--- Obtener IDs de propiedades (copiar PROPERTY_ID_CASA_10 para sección 3)
+-- Obtener IDs de propiedades (copiar PROPERTY_ID_CASA_10 para sección 5)
 SELECT id, house_number, is_delinquent
 FROM public.properties
 WHERE coto_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'::uuid
 ORDER BY house_number;
-
--- ---------------------------------------------------------------------------
--- 3) Perfiles — PASO MANUAL DESPUÉS DE CREAR USUARIOS EN AUTH
--- ---------------------------------------------------------------------------
--- Crear en Dashboard → Authentication → Users:
---   demo.residente@tudominio.com
---   demo.guardia@tudominio.com
---   demo.admin@tudominio.com
--- Password: definir una contraseña solo para demo (no commitear).
---
--- Reemplazar placeholders:
---   <UID_RESIDENTE>  = uuid Auth del residente
---   <UID_GUARDIA>    = uuid Auth del guardia
---   <UID_ADMIN>      = uuid Auth del admin
---   <PROPERTY_ID_CASA_10> = uuid de properties donde house_number = '10'
-
-/*
-UPDATE public.profiles
-SET
-  coto_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'::uuid,
-  role = 'resident'::public.user_role,
-  property_id = '<PROPERTY_ID_CASA_10>'::uuid,
-  house_number = '10',
-  display_name = 'Vecino Demo Casa 10',
-  full_name = 'Vecino Demo Casa 10',
-  approval_status = 'approved'::public.profile_approval_status,
-  email = 'demo.residente@tudominio.com'
-WHERE id = '<UID_RESIDENTE>'::uuid;
-
-UPDATE public.profiles
-SET
-  coto_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'::uuid,
-  role = 'guard'::public.user_role,
-  property_id = NULL,
-  display_name = 'Guardia Demo',
-  approval_status = 'approved'::public.profile_approval_status,
-  email = 'demo.guardia@tudominio.com'
-WHERE id = '<UID_GUARDIA>'::uuid;
-
-UPDATE public.profiles
-SET
-  coto_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'::uuid,
-  role = 'coto_admin'::public.user_role,
-  property_id = NULL,
-  display_name = 'Admin Demo',
-  approval_status = 'approved'::public.profile_approval_status,
-  email = 'demo.admin@tudominio.com'
-WHERE id = '<UID_ADMIN>'::uuid;
-
--- Solo si el admin es rol global 'admin' con varios cotos:
--- UPDATE public.profiles
--- SET active_coto_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'::uuid
--- WHERE id = '<UID_ADMIN>'::uuid;
-*/
-
--- ---------------------------------------------------------------------------
--- 4) Verificación
--- ---------------------------------------------------------------------------
-SELECT id, email, role, coto_id, property_id, house_number, approval_status
-FROM public.profiles
-WHERE coto_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'::uuid
-ORDER BY role, email;
 
 -- ---------------------------------------------------------------------------
 -- Notas
@@ -126,3 +64,119 @@ ORDER BY role, email;
 --   usar UPDATE (sección 3). Si no hay fila, revisar migraciones 20260524*.
 -- • Visita de demo opcional: crear desde la app (eventual, hoy) o insert manual
 --   en public.visits — preferible crear en app para validar RLS end-to-end.
+
+-- ===========================================================================
+-- GUÍA COMPLETA AUTH + PERFILES (único archivo para dejar demo listo)
+-- ===========================================================================
+--
+-- ORDEN DE EJECUCIÓN
+--   A. Ejecutar secciones 1–2 (SQL arriba) en SQL Editor.
+--   B. Crear usuarios en Authentication (pasos abajo).
+--   C. Copiar UUID de Auth + PROPERTY_ID_CASA_10 del SELECT de sección 2.
+--   D. Descomentar y ejecutar los UPDATE de abajo (sección 5).
+--   E. Ejecutar SELECT de verificación (sección 6).
+--
+-- ---------------------------------------------------------------------------
+-- B) Supabase Dashboard → Authentication → Users → Add user (×3)
+-- ---------------------------------------------------------------------------
+--
+-- Crear EXACTAMENTE estos tres usuarios:
+--
+--   | Email                         | Rol final en profiles |
+--   |-------------------------------|------------------------|
+--   | demo.residente@ncoto.demo     | resident               |
+--   | demo.guardia@ncoto.demo       | guard                  |
+--   | demo.admin@ncoto.demo         | coto_admin             |
+--
+-- Contraseña sugerida (solo demo / entorno de prueba):
+--
+--   DemoNCoto2026!
+--
+--   (Cámbiala si tu política de seguridad lo exige; usa la misma en los 3
+--    usuarios para simplificar la presentación.)
+--
+-- En cada alta, activar:
+--
+--   [x] Auto Confirm User
+--
+-- Sin Auto Confirm, el login fallará con email no confirmado.
+--
+-- Tras crear cada usuario, copiar su UUID (columna id en Authentication).
+-- Ese UUID es el id de public.profiles (trigger handle_new_user_profile).
+--
+-- ---------------------------------------------------------------------------
+-- C) Obtener PROPERTY_ID_CASA_10 (si no lo anotaste en sección 2)
+-- ---------------------------------------------------------------------------
+--
+-- SELECT id FROM public.properties
+-- WHERE coto_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'::uuid
+--   AND house_number = '10';
+--
+-- ---------------------------------------------------------------------------
+-- 5) UPDATE profiles — descomentar, reemplazar placeholders, ejecutar
+-- ---------------------------------------------------------------------------
+--
+-- Placeholders:
+--   <UID_RESIDENTE>       = UUID Auth de demo.residente@ncoto.demo
+--   <UID_GUARDIA>         = UUID Auth de demo.guardia@ncoto.demo
+--   <UID_ADMIN>           = UUID Auth de demo.admin@ncoto.demo
+--   <PROPERTY_ID_CASA_10> = UUID de properties (Casa 10)
+
+/*
+-- RESIDENTE (Casa 10, aprobado, con unidad)
+UPDATE public.profiles
+SET
+  coto_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'::uuid,
+  role = 'resident'::public.user_role,
+  property_id = '<PROPERTY_ID_CASA_10>'::uuid,
+  house_number = '10',
+  display_name = 'Vecino Demo Casa 10',
+  full_name = 'Vecino Demo Casa 10',
+  approval_status = 'approved'::public.profile_approval_status,
+  email = 'demo.residente@ncoto.demo'
+WHERE id = '<UID_RESIDENTE>'::uuid;
+
+-- GUARDIA (mismo coto, sin property_id)
+UPDATE public.profiles
+SET
+  coto_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'::uuid,
+  role = 'guard'::public.user_role,
+  property_id = NULL,
+  display_name = 'Guardia Demo',
+  approval_status = 'approved'::public.profile_approval_status,
+  email = 'demo.guardia@ncoto.demo'
+WHERE id = '<UID_GUARDIA>'::uuid;
+
+-- ADMIN LOCAL (coto_admin)
+UPDATE public.profiles
+SET
+  coto_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'::uuid,
+  role = 'coto_admin'::public.user_role,
+  property_id = NULL,
+  display_name = 'Admin Demo',
+  approval_status = 'approved'::public.profile_approval_status,
+  email = 'demo.admin@ncoto.demo'
+WHERE id = '<UID_ADMIN>'::uuid;
+*/
+
+-- ---------------------------------------------------------------------------
+-- 6) Verificación final (debe devolver 3 filas)
+-- ---------------------------------------------------------------------------
+--
+-- SELECT id, email, role, coto_id, property_id, house_number, approval_status
+-- FROM public.profiles
+-- WHERE coto_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'::uuid
+-- ORDER BY role, email;
+--
+-- Esperado:
+--   resident   | demo.residente@ncoto.demo | property_id NOT NULL | approved
+--   guard      | demo.guardia@ncoto.demo   | property_id NULL     | approved
+--   coto_admin | demo.admin@ncoto.demo     | property_id NULL     | approved
+--
+-- ---------------------------------------------------------------------------
+-- Login de prueba (app móvil + web caseta)
+-- ---------------------------------------------------------------------------
+--
+--   Residente: demo.residente@ncoto.demo / DemoNCoto2026!
+--   Guardia:   demo.guardia@ncoto.demo   / DemoNCoto2026!  → web /guardia/scan
+--   Admin:     demo.admin@ncoto.demo      / DemoNCoto2026!  → Panel morosidad
